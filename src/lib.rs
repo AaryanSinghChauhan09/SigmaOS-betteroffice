@@ -193,5 +193,5 @@ impl Document {
 /// Default documents directory.
 pub fn default_docs_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("org", "sigmaos", "sigmaos")
-        .map(|p| p.documents_dir().to_path_buf())
+        .map(|p| p.data_dir().join("documents"))
 }
