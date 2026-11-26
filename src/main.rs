@@ -27,7 +27,10 @@ enum Commands {
     /// Validate a document file.
     Validate { file: PathBuf },
     /// List documents in a directory.
-    List { #[arg(long)] dir: Option<PathBuf> },
+    List {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 fn parse_kind(s: &str) -> Result<DocKind, Box<dyn std::error::Error>> {
@@ -43,7 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     match Cli::parse().command {
         Commands::New { name, kind, dir } => {
-            let dir = dir.or_else(default_docs_dir).unwrap_or_else(|| PathBuf::from("."));
+            let dir = dir
+                .or_else(default_docs_dir)
+                .unwrap_or_else(|| PathBuf::from("."));
             std::fs::create_dir_all(&dir)?;
             let doc = Document::new(&name, parse_kind(&kind)?);
             let path = dir.join(format!("{}.sdoc", name.replace(' ', "-")));
@@ -60,7 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("valid: {}", file.display());
         }
         Commands::List { dir } => {
-            let dir = dir.or_else(default_docs_dir).unwrap_or_else(|| PathBuf::from("."));
+            let dir = dir
+                .or_else(default_docs_dir)
+                .unwrap_or_else(|| PathBuf::from("."));
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for e in entries.flatten() {
                     let p = e.path();
