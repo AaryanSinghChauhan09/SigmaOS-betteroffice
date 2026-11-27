@@ -82,7 +82,7 @@ pub struct SlidesDoc {
 }
 
 /// Unified document.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Document {
     pub name: String,
     pub kind: DocKind,
@@ -93,13 +93,53 @@ pub struct Document {
     pub body: DocBody,
 }
 
-/// Body variants — serialized inline per kind.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Body variants — serialized inline per kind (untagged flattens the
+/// inner struct). Deserialization is kind-directed via `Document`'s
+/// custom Deserialize impl.
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum DocBody {
     Text(TextDoc),
     Sheet(SheetDoc),
     Slides(SlidesDoc),
+}
+
+#[derive(Deserialize)]
+struct DocumentMeta {
+    name: String,
+    kind: DocKind,
+    created_unix: u64,
+    #[serde(default)]
+    modified_unix: u64,
+}
+
+impl<'de> Deserialize<'de> for Document {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v = serde_json::Value::deserialize(deserializer)?;
+        let meta: DocumentMeta =
+            serde_json::from_value(v.clone()).map_err(serde::de::Error::custom)?;
+        let body = match meta.kind {
+            DocKind::Text => {
+                DocBody::Text(serde_json::from_value(v.clone()).map_err(serde::de::Error::custom)?)
+            }
+            DocKind::Sheet => {
+                DocBody::Sheet(serde_json::from_value(v.clone()).map_err(serde::de::Error::custom)?)
+            }
+            DocKind::Slides => {
+                DocBody::Slides(serde_json::from_value(v).map_err(serde::de::Error::custom)?)
+            }
+        };
+        Ok(Document {
+            name: meta.name,
+            kind: meta.kind,
+            created_unix: meta.created_unix,
+            modified_unix: meta.modified_unix,
+            body,
+        })
+    }
 }
 
 impl Document {
@@ -194,4 +234,111 @@ impl Document {
 pub fn default_docs_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("org", "sigmaos", "sigmaos")
         .map(|p| p.data_dir().join("documents"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("bo-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn slides_roundtrip_preserves_content() {
+        // Regression: untagged DocBody matched Sheet first (all fields
+        // defaulted), silently dropping slides on load.
+        let dir = tmpdir("slides");
+        let path = dir.join("deck.sdoc");
+        let mut doc = Document::new("deck", DocKind::Slides);
+        if let DocBody::Slides(d) = &mut doc.body {
+            d.slides.push(Slide {
+                title: "Intro".into(),
+                bullets: vec!["one".into(), "two".into()],
+            });
+        }
+        doc.save(&path).unwrap();
+        let back = Document::load(&path).unwrap();
+        match back.body {
+            DocBody::Slides(d) => {
+                assert_eq!(d.slides.len(), 1);
+                assert_eq!(d.slides[0].title, "Intro");
+                assert_eq!(d.slides[0].bullets.len(), 2);
+            }
+            _ => panic!("slides doc loaded as wrong kind"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sheet_roundtrip_and_math() {
+        let dir = tmpdir("sheet");
+        let path = dir.join("s.sdoc");
+        let mut doc = Document::new("s", DocKind::Sheet);
+        if let DocBody::Sheet(s) = &mut doc.body {
+            s.header = vec!["item".into(), "qty".into()];
+            s.rows = vec![
+                vec!["a".into(), "2".into()],
+                vec!["b".into(), "3".into()],
+                vec!["c".into(), "x".into()], // non-numeric ignored
+            ];
+        }
+        doc.save(&path).unwrap();
+        let back = Document::load(&path).unwrap();
+        match back.body {
+            DocBody::Sheet(s) => {
+                assert_eq!(s.column_sum(1), 5.0);
+                assert_eq!(s.row_count(), 3);
+                assert_eq!(s.col_count(), 2);
+            }
+            _ => panic!("sheet doc loaded as wrong kind"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn text_roundtrip_and_render() {
+        let dir = tmpdir("text");
+        let path = dir.join("t.sdoc");
+        let mut doc = Document::new("t", DocKind::Text);
+        if let DocBody::Text(t) = &mut doc.body {
+            t.paragraphs = vec!["hello".into(), "world".into()];
+        }
+        doc.save(&path).unwrap();
+        let back = Document::load(&path).unwrap();
+        assert!(back.render_text().contains("hello\n\nworld"));
+        assert!(!path.with_extension("sdoc.tmp").exists()); // atomic rename
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_empty_name() {
+        let doc = Document::new("", DocKind::Text);
+        assert!(doc.validate().is_err());
+        let dir = tmpdir("bad");
+        let p = dir.join("bad.sdoc");
+        assert!(doc.save(&p).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_missing_errors() {
+        assert!(Document::load(Path::new("/nonexistent/x.sdoc")).is_err());
+    }
+
+    #[test]
+    fn slide_render_format() {
+        let mut doc = Document::new("d", DocKind::Slides);
+        if let DocBody::Slides(d) = &mut doc.body {
+            d.slides.push(Slide {
+                title: "T".into(),
+                bullets: vec!["b1".into()],
+            });
+        }
+        let r = doc.render_text();
+        assert!(r.contains("Slide 1: T"));
+        assert!(r.contains("  - b1"));
+    }
 }
